@@ -132,7 +132,7 @@ def test_a_touch_line_tick_carries_hsm_field_names(client):
 
     quote = client._to_quote(scrip(4))
 
-    assert quote == {
+    expected = {
         "bid": 2134.0,
         "ask": 2136.0,
         "open": 2100.0,
@@ -145,6 +145,9 @@ def test_a_touch_line_tick_carries_hsm_field_names(client):
         "tk": "11536",
         "e": "nse_cm",
     }
+    assert {key: quote[key] for key in expected} == expected
+    assert quote["broker_price_time"] is None
+    assert quote["time_schema_version"] == 1
 
 
 def test_depth_is_padded_to_the_five_levels_the_adapter_merges(client):

@@ -14,6 +14,7 @@ from websocket_proxy.base_adapter import BaseBrokerWebSocketAdapter
 from .kotak_feed_config import SOURCE_HSM, fetch_feed_config
 from .kotak_websocket import KotakWebSocket
 from .sfeed_websocket import KotakSFeedWebSocket
+from .source_times import SourceCache, time_diagnostics
 
 logger = get_logger(__name__)
 
@@ -139,6 +140,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self._depth_cache = {}  # {(exchange, symbol): depth_dict}
         self._symbol_state = {}  # {broker_exchange|token: data} for partial update merging
         self._depth_poll_state = {}  # {exchange|symbol: data} for depth polling state
+        self._source_cache = SourceCache()
 
         # Mapping from Kotak format to OpenAlgo format - critical for data flow
         self._kotak_to_openalgo = {}  # {(kotak_exchange, token): (exchange, symbol)}
@@ -211,9 +213,12 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
     def _setup_internal_callbacks(self):
         """Setup internal callbacks - following AliceBlue's _on_data_received pattern."""
+        source_client = self._ws_client
 
         def on_quote_internal(quote):
             """Internal callback - mirrors AliceBlue's _on_data_received method."""
+            if self._ws_client is not source_client:
+                return
             try:
                 logger.debug(f"Internal quote callback received: {quote}")
                 self._on_data_received(quote)
@@ -222,6 +227,8 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
         def on_depth_internal(depth):
             """Internal callback for depth data."""
+            if self._ws_client is not source_client:
+                return
             try:
                 logger.debug(f"Internal depth callback received: {depth}")
                 self._on_data_received(depth)
@@ -230,6 +237,8 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
         def on_open_internal():
             """Internal callback when WebSocket transport opens."""
+            if self._ws_client is not source_client:
+                return
             logger.info("Kotak WebSocket transport opened")
             # Reset reconnection state only when connection actually succeeds
             with self._lock:
@@ -239,10 +248,19 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
         def on_close_internal():
             """Internal callback when WebSocket connection closes."""
+            if self._ws_client is not source_client:
+                return
             logger.info("Kotak WebSocket connection closed")
+            self._invalidate_sfeed_connection()
 
             with self._lock:
                 self._connected = False
+                self._ltp_cache.clear()
+                self._quote_cache.clear()
+                self._depth_cache.clear()
+                self._depth_poll_state.clear()
+                self._symbol_state.clear()
+                getattr(self, "_source_cache", SourceCache()).clear()
                 if not self._running:
                     logger.debug("Not reconnecting - adapter stopped")
                     return
@@ -257,6 +275,8 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
         def on_error_internal(error):
             """Internal callback for WebSocket errors."""
+            if self._ws_client is not source_client:
+                return
             logger.error(f"Kotak WebSocket error: {error}")
 
         # Set callbacks on the websocket client - this is crucial
@@ -279,6 +299,10 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
             if isinstance(parsed_data, list):
                 for item in parsed_data:
                     self._on_data_received(item)
+                return
+
+            if isinstance(parsed_data, dict) and parsed_data.get("_kotak_sfeed"):
+                self._on_sfeed_data_received(parsed_data)
                 return
 
             # Work on a copy to avoid mutating the caller's dict
@@ -631,6 +655,45 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
         except Exception as e:
             logger.error(f"Error processing received data: {e}")
 
+    def _on_sfeed_data_received(self, parsed_data):
+        """SFeed snapshots must not use HSM's zero/partial-field merging."""
+        token = str(parsed_data.get("tk", ""))
+        broker_exchange = parsed_data.get("e", "UNKNOWN")
+        mapping_key = (broker_exchange, token)
+        with self._lock:
+            if not getattr(self, "_connected", True):
+                return
+            if mapping_key not in self._kotak_to_openalgo:
+                mapping_key = (broker_exchange, str(parsed_data.get("ts", "") or ""))
+            if mapping_key not in self._kotak_to_openalgo:
+                return
+            exchange, symbol = self._kotak_to_openalgo[mapping_key]
+            if not hasattr(self, "_source_cache"):
+                self._source_cache = SourceCache()
+            if not self._source_cache.update(exchange, symbol, parsed_data):
+                return
+            outputs = []
+            for mode in self._symbol_modes.get(mapping_key, set()):
+                payload = self._source_cache.payload(exchange, symbol, mode)
+                if payload is not None:
+                    label = {1: "LTP", 2: "QUOTE", 3: "DEPTH"}[mode]
+                    outputs.append((f"{exchange}_{symbol}_{label}", payload))
+        for topic, payload in outputs:
+            time_diagnostics("adapter_publication", payload)
+            self.publish_market_data(topic, payload)
+
+    def _invalidate_sfeed_connection(self):
+        """Broker disconnect must invalidate quotes behind a connected proxy."""
+        with self._lock:
+            self._connected = False
+            cache = getattr(self, "_source_cache", None)
+            outputs = cache.disconnect_payloads() if cache else []
+            if cache:
+                cache.clear()
+        for exchange, symbol, payload in outputs:
+            time_diagnostics("adapter_disconnected", payload)
+            self.publish_market_data(f"{exchange}_{symbol}_DEPTH", payload)
+
     def _is_partial_update(self, parsed_data):
         """
         Determine if this is a partial update based on missing expected fields.
@@ -812,6 +875,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 finally:
                     self._ws_client = None
 
+            self._invalidate_sfeed_connection()
             # Clear all internal caches to release memory
             with self._lock:
                 self._connected = False
@@ -819,6 +883,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self._quote_cache.clear()
                 self._depth_cache.clear()
                 self._symbol_state.clear()
+                getattr(self, "_source_cache", SourceCache()).clear()
                 self._depth_poll_state.clear()
                 self._kotak_to_openalgo.clear()
                 self._symbol_modes.clear()
@@ -904,7 +969,12 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
             if self._ws_client:
                 # Clear stale state from old session before reconnecting
                 with self._lock:
+                    self._ltp_cache.clear()
+                    self._quote_cache.clear()
+                    self._depth_cache.clear()
+                    self._depth_poll_state.clear()
                     self._symbol_state.clear()
+                    getattr(self, "_source_cache", SourceCache()).clear()
 
                 # Connect the new client (async — _connected is set by on_open callback,
                 # which also resets _reconnect_attempts and _reconnecting)
@@ -1010,6 +1080,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 finally:
                     self._ws_client = None
 
+            self._invalidate_sfeed_connection()
             # Reset adapter state
             with self._lock:
                 self._running = False
@@ -1020,6 +1091,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self._quote_cache.clear()
                 self._depth_cache.clear()
                 self._symbol_state.clear()
+                getattr(self, "_source_cache", SourceCache()).clear()
                 self._depth_poll_state.clear()
                 self._kotak_to_openalgo.clear()
                 self._symbol_modes.clear()
@@ -1257,6 +1329,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                         # Clean up symbol state to prevent unbounded memory growth
                         symbol_key = f"{kotak_exchange}|{token}"
                         self._symbol_state.pop(symbol_key, None)
+                        getattr(self, "_source_cache", SourceCache()).discard(exchange, symbol)
                         logger.debug(f"Cleaned up mapping for: {exchange}:{symbol}")
 
             # Enqueue outside lock — batched by _process_batch_subscriptions,
@@ -1363,6 +1436,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                         # Clean up symbol state to prevent unbounded memory growth
                         symbol_key = f"{kotak_exchange}|{token}"
                         self._symbol_state.pop(symbol_key, None)
+                        getattr(self, "_source_cache", SourceCache()).discard(exchange, symbol)
                         logger.debug(f"Cleaned up mapping for: {exchange}:{symbol}")
 
             # Enqueue outside lock — batched by _process_batch_subscriptions.
@@ -1394,6 +1468,8 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 }
 
             logger.debug(f"get_ltp returning: {ltp_dict}")
+            for exchange, symbols in getattr(self, "_source_cache", SourceCache()).snapshots(1).items():
+                ltp_dict.setdefault(exchange, {}).update(symbols)
             return ltp_dict  # Return nested dict format
 
     def get_quote(self):
@@ -1418,6 +1494,8 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 }
 
             logger.debug(f"get_quote returning: {quote_dict}")
+            for exchange, symbols in getattr(self, "_source_cache", SourceCache()).snapshots(2).items():
+                quote_dict.setdefault(exchange, {}).update(symbols)
             return quote_dict
 
     def get_depth(self):
@@ -1480,18 +1558,26 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 }
 
             logger.debug(f"get_depth returning: {depth_dict}")
+            for exchange, symbols in getattr(self, "_source_cache", SourceCache()).snapshots(3).items():
+                depth_dict.setdefault(exchange, {}).update(symbols)
             return depth_dict
 
     def get_last_quote(self):
         """Return the last quote data."""
         with self._lock:
-            return dict(self._quote_cache)
+            result = dict(self._quote_cache)
+            for exchange, symbols in getattr(self, "_source_cache", SourceCache()).snapshots(2).items():
+                for symbol, payload in symbols.items():
+                    result[(exchange, symbol)] = payload
+            return result
 
     def get_last_depth(self):
         """Return last depth data."""
         with self._lock:
+            if getattr(self, "_source_cache", SourceCache()).records:
+                return self._source_cache.snapshots(3)
             if self._ws_client:
-                return self._ws_client.get_last_depth()
+                return getattr(self._ws_client, "get_last_depth", lambda: {})()
         return {}
 
     def is_connected(self):
