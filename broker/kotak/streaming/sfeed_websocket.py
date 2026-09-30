@@ -32,13 +32,13 @@ from broker.kotak.streaming.sfeed_protocol import (
     EXCHANGE_NAME_TO_ID,
     LEVEL_DEPTH,
     LEVEL_FULL_DEPTH,
-    LEVEL_TOUCH_LINE,
     MSG_AUTH_RESPONSE_CODES,
     MSG_SUBSCRIBE_ACK,
     decode_packet,
     split_batch,
 )
 from utils.logging import get_logger
+from .source_times import decoded_times, time_diagnostics, utc_now
 
 logger = get_logger(__name__)
 
@@ -471,6 +471,7 @@ class KotakSFeedWebSocket:
         logger.debug(f"SFeed subscribe ack mapped {len(symbols)} trading symbols")
 
     def _handle_binary(self, frame):
+        received_at = utc_now()
         with self._lock:
             dividers = self._dividers
             authenticated = self._is_authenticated
@@ -485,6 +486,8 @@ class KotakSFeedWebSocket:
         for packet in split_batch(frame):
             decoded = decode_packet(packet, dividers)
             if decoded is not None:
+                decoded["_server_received_at"] = received_at
+                time_diagnostics("decoded_broker_packet", decoded)
                 self._dispatch(decoded)
 
     def _handle_error(self, ws, error):
@@ -573,6 +576,7 @@ class KotakSFeedWebSocket:
         buy = decoded.get("buy") or []
         sell = decoded.get("sell") or []
         return {
+            **decoded_times(decoded, received_at=decoded.get("_server_received_at")),
             "bid": buy[0]["price"] if buy else 0.0,
             "ask": sell[0]["price"] if sell else 0.0,
             "open": decoded.get("open_price", 0.0),
@@ -581,6 +585,9 @@ class KotakSFeedWebSocket:
             "ltp": decoded.get("last_traded_price", 0.0),
             "prev_close": decoded.get("close_price", 0.0),
             "volume": decoded.get("volume_traded_today", 0),
+            "oi": decoded.get("open_interest", 0),
+            "totalbuyqty": decoded.get("total_buy_quantity", 0),
+            "totalsellqty": decoded.get("total_sell_quantity", 0),
             "ts": self._symbol_for(decoded),
             "tk": decoded.get("instrument_token", ""),
             "e": decoded.get("exchange_segment", ""),
@@ -589,11 +596,11 @@ class KotakSFeedWebSocket:
     def _to_quote_lite(self, decoded):
         """Mini touch line. Carries no OHLC or book, only a traded price.
 
-        The absent fields are sent as 0.0 rather than omitted: the adapter
-        treats a zero price field as "no update" and merges the last known
-        value over it, so zeros are how you say "unchanged" in this contract.
+        Legacy absent fields are zero placeholders. The source component
+        cache identifies scrip_lite and leaves quote/depth components alone.
         """
         return {
+            **decoded_times(decoded, received_at=decoded.get("_server_received_at")),
             "bid": 0.0,
             "ask": 0.0,
             "open": 0.0,
@@ -630,6 +637,7 @@ class KotakSFeedWebSocket:
 
     def _to_index(self, decoded):
         return {
+            **decoded_times(decoded, received_at=decoded.get("_server_received_at")),
             "bid": 0.0,
             "ask": 0.0,
             "open": decoded.get("open_price", 0.0),

@@ -228,6 +228,7 @@ def test_a_never_traded_instrument_reports_no_update_time_as_zero():
     decoded = sf.decode_packet(packet, {NSE_CM: 100})
 
     assert decoded["last_update_time"] == 0
+    assert decoded["last_update_time_raw"] == -2208988800
 
 
 def test_the_auction_flag_is_surfaced():

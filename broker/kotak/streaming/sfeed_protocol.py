@@ -364,6 +364,7 @@ def _decode_market_picture(packet, exchange, divider, level, auction_flag, messa
     # the exchange's blank placeholder, 1900-01-01 IST as a signed Unix time -
     # where last_trade_time uses plain 0 for the same "nothing yet" case.
     # Normalize the two onto one convention so a consumer needs one check.
+    last_update_time_raw = last_update_time
     if last_update_time < 0:
         last_update_time = 0
 
@@ -399,6 +400,7 @@ def _decode_market_picture(packet, exchange, divider, level, auction_flag, messa
         "average_trade_price": avg_trade_price / divider,
         "last_trade_time": last_trade_time,
         "last_update_time": last_update_time,
+        "last_update_time_raw": last_update_time_raw,
         "last_trade_qty": last_trade_qty,
         "total_buy_quantity": total_buy_qty,
         "total_sell_quantity": total_sell_qty,

@@ -2101,7 +2101,10 @@ class WebSocketProxy:
                         "data": market_data,
                     }
                     market_data_service = get_market_data_service()
-                    market_data_service.process_market_data(mds_data)
+                    # Source disconnect notices invalidate client clocks; they
+                    # are not price ticks and must not trigger sandbox/RMS fills.
+                    if market_data.get("source_connection_state") != "disconnected":
+                        market_data_service.process_market_data(mds_data)
                 except Exception as mds_error:
                     # Don't block WebSocket delivery if MarketDataService has issues
                     logger.debug(f"MarketDataService processing error: {mds_error}")
