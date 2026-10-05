@@ -266,3 +266,36 @@ def test_container_environment_wins_at_both_dotenv_loading_boundaries():
         assert loads
         assert all(any(k.arg=="override" and isinstance(k.value,ast.Constant) and k.value.value is False
                        for k in call.keywords) for call in loads)
+
+
+def test_valid_token_with_stale_contracts_refreshes_without_login(isolated,monkeypatch):
+    config,engine = isolated
+    from sqlalchemy import insert, select
+    with engine.begin() as conn:
+        conn.execute(insert(service.operations).values(id="contracts",username="test-user",day="2026-10-06",
+            state="running",attempts=0,updated=time.time(),details="{}"))
+    monkeypatch.setattr(service,"authentication_lock",lambda user:nullcontext())
+    monkeypatch.setattr(service,"status",lambda cfg:{"mode":"analyze","authentication":"valid","contracts_ready":False})
+    import utils.auth_utils as auth_utils
+    import broker.kotak.api.auth_api as auth_api
+    refreshed=[]
+    monkeypatch.setattr(auth_utils,"prepare_broker_contracts",refreshed.append)
+    monkeypatch.setattr(auth_api,"authenticate_broker",lambda *a:pytest.fail("Valid login was renewed"))
+    service.worker(Flask(__name__),config,"contracts")
+    with engine.connect() as conn:row=conn.execute(select(service.operations)).mappings().one()
+    assert refreshed==["kotak"] and row["state"]=="completed" and row["attempts"]==0
+
+
+def test_contract_operation_never_renews_an_expired_token(isolated,monkeypatch):
+    config,engine=isolated
+    from sqlalchemy import insert,select
+    with engine.begin() as conn:
+        conn.execute(insert(service.operations).values(id="contracts:fixture",username="test-user",day="2026-10-06",
+            state="running",attempts=0,updated=time.time(),details="{}"))
+    monkeypatch.setattr(service,"authentication_lock",lambda user:nullcontext())
+    monkeypatch.setattr(service,"status",lambda cfg:{"mode":"analyze","authentication":"expired"})
+    import broker.kotak.api.auth_api as auth_api
+    monkeypatch.setattr(auth_api,"authenticate_broker",lambda *a:pytest.fail("Contract preparation renewed authentication"))
+    service.worker(Flask(__name__),config,"contracts:fixture")
+    with engine.connect() as conn:row=conn.execute(select(service.operations)).mappings().one()
+    assert row["state"]=="blocked" and row["attempts"]==0

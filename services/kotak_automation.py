@@ -225,10 +225,16 @@ def worker(app, config, operation):
                 finish(operation, "blocked", 0, "Analyzer mode is required")
                 return
             if current["authentication"] == "valid":
+                if not current.get("contracts_ready", True):
+                    from utils.auth_utils import prepare_broker_contracts
+                    prepare_broker_contracts("kotak")
                 finish(operation, "completed", 0, "Existing broker authentication reused")
                 return
             if current["authentication"] != "expired":
                 finish(operation, "blocked", 0, "Broker authentication validity is unknown")
+                return
+            if operation.startswith("contracts:"):
+                finish(operation, "blocked", 0, "Authentication expired before contract preparation; no login submitted")
                 return
             if not clock_verified():
                 finish(operation, "blocked", 0, "Server clock could not be verified against Kotak")

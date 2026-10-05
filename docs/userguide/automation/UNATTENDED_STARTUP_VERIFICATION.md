@@ -7,8 +7,8 @@ deployed release certificate or an unattended trading activation.
 
 | Component | Identity |
 |---|---|
-| Execution Plane source | `33d17d20bd0d8a2984475e5e292985587e7d55ed5d15a28edc8eb0a728eb19d8` |
-| OpenAlgo automation source | `d8da209e90aaadb2f199be8b2de78490be26a88011e271e16c6c8f86feebd45e` |
+| Execution Plane source | `57fb6446bf8075d68fa8e4b6820c24f29508f10565791d4a7c0e11a80bfc1f5a` |
+| OpenAlgo automation source | `265247228a6ed9ee3393b82e133a9f60acee04e07c35ac8e8054b0b7d8ede360` |
 | Execution Plane SQLite | Schema 6 |
 | Deployment / protection / execution scopes | 3 / 4 / 5 |
 | Automation HTTP contract | 1 |
@@ -22,8 +22,8 @@ do not certify these changes.
 
 | Check | Result |
 |---|---|
-| Execution Plane full Python suite | 377 passed |
-| Kotak automation, token-format, callback and session-resume suites | 90 passed |
+| Execution Plane full Python suite | 381 passed |
+| Kotak automation, token-format, callback and session-resume suites | 92 passed |
 | Dashboard TypeScript and production build | Passed |
 | Desktop/mobile dashboard, keyboard history, errors, single-slot display and report downloads | Passed |
 | Both base Compose configurations with built-in private-network attachments | Valid |
@@ -34,7 +34,8 @@ Coverage includes daily uniqueness, pre-open waiting, missed windows, calendar
 failure, restart reuse, signed account-scoped requests, replay rejection, clock
 skew, valid-token reuse, TOTP/MPIN renewal, bounded rate-limit attempts, ambiguous
 login fencing, immutable authentication events, stale browser-cookie expiry,
-management revisions, source-identity changes, protection coverage and
+management revisions across restart, source-identity changes, valid-token contract
+refresh, exposure-aware startup renewal, protection coverage and
 authenticated/origin-checked dashboard controls. Existing execution regressions
 remain part of the full Execution Plane suite.
 

@@ -123,7 +123,10 @@ nonce, body hash and the existing OpenAlgo API-key hash. The service also verifi
 that this API key belongs to the configured OpenAlgo user. Nonces are retained in OpenAlgo's existing database.
 Requests older/newer than 30 seconds or reused nonces are rejected. The service
 accepts only `operation_id`, scopes credentials to one configured user and
-returns no broker token. Valid tokens are reused without feed teardown.
+returns no broker token. Valid tokens are reused without feed teardown. Stale
+master contracts can be refreshed through a separate saved operation without
+logging in again. A contract-only operation never renews an expired token; that
+requires the normal authentication fence.
 
 Authentication has at most three attempts for explicit transient broker
 responses. Rejected credentials stop immediately. An ambiguous timeout,

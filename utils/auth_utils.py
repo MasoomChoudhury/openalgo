@@ -360,16 +360,21 @@ def async_master_contract_download(broker):
     return master_contract_status
 
 
-def persist_broker_authentication(auth_token, username, broker, feed_token=None, user_id=None):
-    """Shared browser/machine token persistence and master-contract lifecycle."""
-    inserted_id = upsert_auth(username, auth_token, broker, feed_token=feed_token, user_id=user_id)
-    if not inserted_id:
-        return False
+def prepare_broker_contracts(broker):
+    """Load valid cached contracts or refresh stale contracts without token renewal."""
     init_broker_status(broker)
     should_download, reason = should_download_master_contract(broker)
     logger.info("Master contract readiness check for %s: %s", broker, reason)
     target = async_master_contract_download if should_download else load_existing_master_contract
     Thread(target=target, args=(broker,), daemon=True).start()
+
+
+def persist_broker_authentication(auth_token, username, broker, feed_token=None, user_id=None):
+    """Shared browser/machine token persistence and master-contract lifecycle."""
+    inserted_id = upsert_auth(username, auth_token, broker, feed_token=feed_token, user_id=user_id)
+    if not inserted_id:
+        return False
+    prepare_broker_contracts(broker)
     return True
 
 
