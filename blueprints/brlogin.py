@@ -38,6 +38,17 @@ def ratelimit_handler(e):
 @limiter.limit(LOGIN_RATE_LIMIT_MIN)
 @limiter.limit(LOGIN_RATE_LIMIT_HOUR)
 def broker_callback(broker, para=None):
+    if broker == "kotak" and request.method == "POST" and session.get("user"):
+        from services.kotak_automation import authentication_lock
+        try:
+            with authentication_lock(session["user"]):
+                return _broker_callback(broker, para)
+        except RuntimeError:
+            return jsonify(error="Broker authentication already in progress"), 409
+    return _broker_callback(broker, para)
+
+
+def _broker_callback(broker, para=None):
     logger.info(f"Broker callback initiated for: {broker}")
     logger.debug("Session keys: %s", sorted(session.keys()))
     logger.info(f"Session has user key: {'user' in session}")

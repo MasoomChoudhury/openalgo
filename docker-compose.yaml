@@ -24,6 +24,14 @@ services:
       - FLASK_ENV=${FLASK_ENV:-production}
       - FLASK_DEBUG=${FLASK_DEBUG:-0}
       - TZ=Asia/Kolkata
+      - BROKER_API_KEY=${BROKER_API_KEY:-}
+      - BROKER_API_SECRET=${BROKER_API_SECRET:-}
+      - KOTAK_AUTOLOGIN_ENABLED=${KOTAK_AUTOLOGIN_ENABLED:-true}
+      - KOTAK_AUTOLOGIN_USERNAME=${KOTAK_AUTOLOGIN_USERNAME:-masoom}
+      - KOTAK_MOBILE_NUMBER=${KOTAK_MOBILE_NUMBER:-}
+      - KOTAK_MPIN=${KOTAK_MPIN:-}
+      - KOTAK_TOTP_SECRET=${KOTAK_TOTP_SECRET:-}
+      - OPENALGO_AUTOMATION_SECRET=${OPENALGO_AUTOMATION_SECRET:-}
       # Limit OpenBLAS/NumPy threads to prevent RLIMIT_NPROC exhaustion
       # See: https://github.com/marketcalls/openalgo/issues/822
       - OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-2}
@@ -49,6 +57,16 @@ services:
       start_period: 40s
 
     restart: unless-stopped
+    networks:
+      default:
+      openalgo_automation:
+        aliases:
+          - openalgo-automation
+
+networks:
+  openalgo_automation:
+    external: true
+    name: openalgo-automation
 
 # Define named volumes for persistence
 volumes:

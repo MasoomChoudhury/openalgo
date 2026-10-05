@@ -50,7 +50,7 @@ def authenticate_broker(mobile_number, totp, mpin):
             logger.error("BROKER_API_SECRET (Access Token) is not configured")
             return None, "BROKER_API_SECRET (Access Token) is required in .env file"
 
-        logger.debug(f"Parsed UCC: {ucc}, Access Token length: {len(access_token)}")
+        logger.debug("Kotak API credentials configured")
 
         # Ensure mobile number has +91 prefix
         # Handle all cases: +919876543210, 919876543210, 9876543210
@@ -74,7 +74,7 @@ def authenticate_broker(mobile_number, totp, mpin):
             "Content-Type": "application/json",
         }
 
-        logger.debug(f"TOTP Login Request - Mobile: {mobile_number[:5]}***, UCC: {ucc}")
+        logger.debug("TOTP login request initiated")
 
         response = client.post(
             "https://mis.kotaksecurities.com/login/1.0/tradeApiLogin",
@@ -84,14 +84,18 @@ def authenticate_broker(mobile_number, totp, mpin):
 
         logger.debug(f"TOTP Login Response Status: {response.status_code}")
 
+        if response.status_code == 429:
+            return None, "Kotak authentication rate limited"
+        if response.status_code >= 500:
+            return None, "Kotak authentication temporarily unavailable"
         data_dict = json.loads(response.text)
         logger.debug(f"TOTP Login Response fields: {list(data_dict)}")
 
         # Check for errors in TOTP login
         if "data" not in data_dict or data_dict.get("data", {}).get("status") != "success":
             error_msg = data_dict.get("errMsg", data_dict.get("message", "TOTP login failed"))
-            logger.error(f"TOTP Login Failed - Response: {data_dict}")
-            return None, f"TOTP Login Error: {error_msg}"
+            logger.error("Kotak rejected TOTP authentication")
+            return None, "Kotak rejected TOTP authentication"
 
         # Extract View token and sid
         view_token = data_dict["data"]["token"]
@@ -120,14 +124,18 @@ def authenticate_broker(mobile_number, totp, mpin):
 
         logger.debug(f"MPIN Validation Response Status: {response.status_code}")
 
+        if response.status_code == 429:
+            return None, "Kotak authentication rate limited"
+        if response.status_code >= 500:
+            return None, "Kotak authentication temporarily unavailable"
         data_dict = json.loads(response.text)
         logger.debug(f"MPIN Validation Response fields: {list(data_dict)}")
 
         # Check for errors in MPIN validation
         if "data" not in data_dict or data_dict.get("data", {}).get("status") != "success":
             error_msg = data_dict.get("errMsg", data_dict.get("message", "MPIN validation failed"))
-            logger.error(f"MPIN Validation Failed - Response: {data_dict}")
-            return None, f"MPIN Validation Error: {error_msg}"
+            logger.error("Kotak rejected MPIN authentication")
+            return None, "Kotak rejected MPIN authentication"
 
         # Extract Trading token, sid, and baseUrl
         trading_token = data_dict["data"]["token"]
@@ -168,11 +176,11 @@ def authenticate_broker(mobile_number, totp, mpin):
         logger.error(f"Missing expected field in API response: {str(e)}")
         return None, f"Missing expected field in API response: {str(e)}"
     except httpx.HTTPError as e:
-        logger.error(f"HTTP request failed: {str(e)}")
-        return None, f"HTTP request failed: {str(e)}"
+        logger.error("Kotak authentication transport failed")
+        return None, "Kotak authentication transport result is ambiguous"
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON response: {str(e)}")
         return None, f"Failed to parse JSON response: {str(e)}"
     except Exception as e:
-        logger.error(f"Authentication error: {str(e)}")
-        return None, f"Authentication error: {str(e)}"
+        logger.error("Kotak authentication failed")
+        return None, "Kotak authentication result is ambiguous"

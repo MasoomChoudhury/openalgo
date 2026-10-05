@@ -4,8 +4,8 @@ import os
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file with override=True to ensure values are updated
-load_dotenv(override=True)
+# Deployment environment wins over a mounted .env; preserves Dokploy secrets.
+load_dotenv(override=False)
 
 
 def get_broker_api_key() -> str | None:

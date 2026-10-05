@@ -175,6 +175,23 @@ def has_login_this_trading_session(username) -> bool:
 
 
 def revoke_user_tokens(revoke_db_tokens=True):
+    # Browser expiry and machine renewal share the same account fence. An old
+    # cookie cannot revoke the token between persistence and machine registration.
+    if revoke_db_tokens and session.get("broker") == "kotak" and session.get("user"):
+        from services.kotak_automation import authentication_lock
+        try:
+            with authentication_lock(session["user"]):
+                return _revoke_user_tokens(revoke_db_tokens)
+        except RuntimeError:
+            current_sid = session.get("session_id")
+            if current_sid:
+                from database.auth_db import remove_session
+                remove_session(current_sid)
+            return
+    return _revoke_user_tokens(revoke_db_tokens)
+
+
+def _revoke_user_tokens(revoke_db_tokens=True):
     """
     Revoke auth tokens for the current user when session expires.
 

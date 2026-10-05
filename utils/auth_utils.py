@@ -360,6 +360,19 @@ def async_master_contract_download(broker):
     return master_contract_status
 
 
+def persist_broker_authentication(auth_token, username, broker, feed_token=None, user_id=None):
+    """Shared browser/machine token persistence and master-contract lifecycle."""
+    inserted_id = upsert_auth(username, auth_token, broker, feed_token=feed_token, user_id=user_id)
+    if not inserted_id:
+        return False
+    init_broker_status(broker)
+    should_download, reason = should_download_master_contract(broker)
+    logger.info("Master contract readiness check for %s: %s", broker, reason)
+    target = async_master_contract_download if should_download else load_existing_master_contract
+    Thread(target=target, args=(broker,), daemon=True).start()
+    return True
+
+
 def handle_auth_success(auth_token, user_session_key, broker, feed_token=None, user_id=None):
     """
     Handles common tasks after successful authentication.
@@ -424,29 +437,10 @@ def handle_auth_success(auth_token, user_session_key, broker, feed_token=None, u
     except Exception:
         pass  # Don't block login if logging fails
 
-    # Store auth token in database
-    inserted_id = upsert_auth(
-        user_session_key, auth_token, broker, feed_token=feed_token, user_id=user_id
+    inserted_id = persist_broker_authentication(
+        auth_token, user_session_key, broker, feed_token=feed_token, user_id=user_id
     )
     if inserted_id:
-        logger.info(f"Database record upserted with ID: {inserted_id}")
-        # Initialize master contract status for this broker
-        init_broker_status(broker)
-
-        # Smart download: Check if we need to download or can use cached data
-        should_download, reason = should_download_master_contract(broker)
-        logger.info(f"Smart download check for {broker}: should_download={should_download}, reason={reason}")
-
-        if should_download:
-            # Start async download in background thread
-            thread = Thread(target=async_master_contract_download, args=(broker,), daemon=True)
-            thread.start()
-        else:
-            # Use cached data - load existing master contract
-            logger.info(f"Skipping download for {broker}: {reason}")
-            thread = Thread(target=load_existing_master_contract, args=(broker,), daemon=True)
-            thread.start()
-
         # Return JSON for AJAX requests (React), redirect for OAuth callbacks
         if is_ajax_request():
             return jsonify(

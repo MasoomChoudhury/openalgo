@@ -277,6 +277,10 @@ def create_app():
         logger.warning("React frontend not available - run 'npm run build' in frontend/")
 
     app.register_blueprint(api_v1_bp)
+    from blueprints.kotak_automation import kotak_automation_bp
+    app.register_blueprint(kotak_automation_bp)
+    # Machine requests carry replay-protected HMAC authentication, not cookies.
+    csrf.exempt(kotak_automation_bp)
 
     # Pull openstatz in on a background thread. It costs about 1.4s, almost all
     # of it matplotlib and seaborn behind its plotting module, which the

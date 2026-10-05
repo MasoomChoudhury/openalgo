@@ -1151,8 +1151,8 @@ def load_and_check_env_variables() -> None:
         print("\nSolution: Copy .sample.env to .env and configure your settings")
         sys.exit(1)
 
-    # Load environment variables from the .env file with override=True to ensure values are updated
-    load_dotenv(dotenv_path=env_path, override=True)
+    # Dokploy/container values take precedence over mounted file defaults.
+    load_dotenv(dotenv_path=env_path, override=False)
 
     # Detect the publicly-known sample APP_KEY/API_KEY_PEPPER values and rotate
     # them to fresh random secrets on first run. Silent no-op for any user
