@@ -70,7 +70,9 @@ def configuration():
     if not re.fullmatch(r"\d{6}", values["KOTAK_MPIN"]):
         raise ValueError("Kotak MPIN must contain six digits")
     try:
-        base64.b32decode(values["KOTAK_TOTP_SECRET"].upper(), casefold=True)
+        # Authenticator setup seeds commonly omit Base32 padding, as PyOTP supports.
+        seed = values["KOTAK_TOTP_SECRET"].upper()
+        base64.b32decode(seed + "=" * (-len(seed) % 8), casefold=True)
         pyotp.TOTP(values["KOTAK_TOTP_SECRET"]).now()
     except Exception as exc:
         raise ValueError("Invalid Kotak authenticator seed format") from exc

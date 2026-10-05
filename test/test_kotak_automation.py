@@ -249,6 +249,14 @@ def test_configuration_preserves_mpin_and_rejects_wrong_seed(isolated,monkeypatc
     monkeypatch.setattr(credentials,"get_broker_api_key",lambda:"fixture-ucc")
     monkeypatch.setattr(credentials,"get_broker_api_secret",lambda:"fixture-access")
     assert ORIGINAL_CONFIGURATION()["KOTAK_MPIN"]=="012345"
+    # Standard unpadded authenticator seeds must validate exactly as PyOTP does.
+    import base64
+    for raw in (b"a", b"ab", b"abc", b"abcd", b"abcde", b"sixteen-byte-key"):
+        padded = base64.b32encode(raw).decode()
+        for seed in (padded, padded.rstrip("="), padded.rstrip("=").lower()):
+            monkeypatch.setenv("KOTAK_TOTP_SECRET", seed)
+            assert ORIGINAL_CONFIGURATION()["KOTAK_TOTP_SECRET"] == seed
+            assert service.pyotp.TOTP(seed).at(1770000000) == service.pyotp.TOTP(padded).at(1770000000)
     monkeypatch.setenv("KOTAK_TOTP_SECRET","invalid-secret-seed")
     with pytest.raises(ValueError,match="seed format"):ORIGINAL_CONFIGURATION()
     monkeypatch.setenv("KOTAK_AUTOLOGIN_ENABLED","false")
