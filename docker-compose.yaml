@@ -32,6 +32,7 @@ services:
       - KOTAK_MPIN=${KOTAK_MPIN:-}
       - KOTAK_TOTP_SECRET=${KOTAK_TOTP_SECRET:-}
       - OPENALGO_AUTOMATION_SECRET=${OPENALGO_AUTOMATION_SECRET:-}
+      - KOTAK_TIME_DIAGNOSTICS=${KOTAK_TIME_DIAGNOSTICS:-false}
       # Limit OpenBLAS/NumPy threads to prevent RLIMIT_NPROC exhaustion
       # See: https://github.com/marketcalls/openalgo/issues/822
       - OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-2}
