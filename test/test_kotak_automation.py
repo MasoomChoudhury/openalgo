@@ -17,6 +17,26 @@ from blueprints.kotak_automation import kotak_automation_bp
 SECRET="s"*64
 ORIGINAL_CONFIGURATION = service.configuration
 
+
+def test_success_flag_cannot_certify_a_missing_nfo_master(isolated, monkeypatch):
+    import database.auth_db as auth
+    import database.master_contract_status_db as contracts
+    import database.settings_db as settings
+    import utils.auth_utils as auth_utils
+    import utils.session as sessions
+    import broker.kotak.database.master_contract_db as master
+    monkeypatch.setattr(auth, "get_auth_token_fresh", lambda _user: "fixture")
+    monkeypatch.setattr(service, "probe_token", lambda _token: "valid")
+    monkeypatch.setattr(sessions, "has_login_this_trading_session", lambda _user: True)
+    monkeypatch.setattr(contracts, "get_status", lambda _broker: {"is_ready": True, "status": "success"})
+    monkeypatch.setattr(auth_utils, "should_download_master_contract", lambda _broker: (False, "cached"))
+    monkeypatch.setattr(settings, "get_analyze_mode", lambda: True)
+    monkeypatch.setattr(master, "current_nifty_options_ready", lambda: False)
+    result = service.status(isolated[0])
+    assert result["authentication"] == "valid"
+    assert not result["contracts_ready"]
+    assert result["contracts_status"] == "missing_current_nifty_options"
+
 @pytest.fixture
 def isolated(tmp_path,monkeypatch):
     engine=create_engine("sqlite:///"+str(tmp_path/"auth.db"))

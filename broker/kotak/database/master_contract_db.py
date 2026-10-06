@@ -5,6 +5,9 @@ import io
 import json
 import os
 import shutil
+from datetime import datetime
+from tempfile import TemporaryDirectory
+from zoneinfo import ZoneInfo
 
 import httpx
 import numpy as np
@@ -87,12 +90,44 @@ def copy_from_dataframe(df):
         db_session.rollback()
 
 
+def _current_nifty_options(rows, today=None):
+    today = today or datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    expiries = {}
+    for row in rows:
+        if row.get("exchange") != "NFO" or row.get("name") != "NIFTY":
+            continue
+        try:
+            expiry = datetime.strptime(str(row.get("expiry")), "%d-%b-%y").date()
+            lot, tick = float(row.get("lotsize") or 0), float(row.get("tick_size") or 0)
+            if expiry < today or not np.isfinite(lot) or not np.isfinite(tick) or lot <= 0 or tick <= 0:
+                continue
+        except (ValueError, TypeError):
+            continue
+        kind = str(row.get("instrumenttype") or "")
+        if kind not in {"CE", "PE"}:
+            kind = str(row.get("symbol") or "")[-2:]
+        expiries.setdefault(expiry, set()).add(kind)
+    return any({"CE", "PE"} <= kinds for kinds in expiries.values())
+
+
+def current_nifty_options_ready():
+    """Check contracts themselves; a global download flag cannot prove NFO readiness."""
+    try:
+        rows = db_session.query(SymToken).filter(SymToken.exchange == "NFO", SymToken.name == "NIFTY").all()
+        return _current_nifty_options([{k: getattr(row, k) for k in
+            ("exchange", "name", "expiry", "lotsize", "tick_size", "instrumenttype", "symbol")} for row in rows])
+    except Exception:
+        return False
+    finally:
+        db_session.remove()
+
+
 def download_csv_kotak_data(output_path):
     logger.info("Downloading Master Contract CSV Files")
 
     # URLs of the CSV files to be downloaded
     csv_urls = get_kotak_master_filepaths()
-    logger.info(f"Master contract URLs: {csv_urls}")
+    logger.info("Master contract segments: %s", sorted(csv_urls))
 
     if not csv_urls:
         logger.error("No master contract URLs found - scripmaster API failed")
@@ -107,7 +142,7 @@ def download_csv_kotak_data(output_path):
     # Iterate through the URLs and download the CSV files
     for key, url in csv_urls.items():
         try:
-            logger.info(f"Downloading {key} from {url}")
+            logger.info("Downloading master contract segment %s", key)
             # Send GET request using httpx
             response = client.get(url, timeout=30)
             # Check if the request was successful
@@ -121,12 +156,12 @@ def download_csv_kotak_data(output_path):
                 logger.info(f"Successfully downloaded {key} ({len(response.content)} bytes)")
             else:
                 logger.error(
-                    f"Failed to download {key} from {url}. Status code: {response.status_code}"
+                    f"Failed to download {key}. Status code: {response.status_code}"
                 )
         except httpx.HTTPError as e:
-            logger.error(f"HTTP error downloading {key}: {e}")
+            logger.error("HTTP error downloading %s: %s", key, type(e).__name__)
         except Exception as e:
-            logger.error(f"Error downloading {key}: {e}")
+            logger.error("Error downloading %s: %s", key, type(e).__name__)
 
     if not downloaded_files:
         raise Exception("No master contract files were downloaded successfully")
@@ -614,18 +649,7 @@ def delete_kotak_temp_data(output_path):
 def master_contract_download():
     logger.info("Downloading Master Contract")
 
-    output_path = "tmp"
     try:
-        # Download CSV files
-        downloaded_files = download_csv_kotak_data(output_path)
-
-        if not downloaded_files:
-            raise Exception("No CSV files were downloaded successfully")
-
-        # Clear existing data
-        delete_symtoken_table()
-
-        # Process each exchange if the file exists
         processors = [
             ("NSE_CM.csv", process_kotak_nse_csv, "NSE Cash"),
             ("NSE_FO.csv", process_kotak_nfo_csv, "NSE F&O"),
@@ -635,43 +659,47 @@ def master_contract_download():
             ("BSE_FO.csv", process_kotak_bfo_csv, "BSE F&O"),
         ]
 
-        total_records = 0
-        for filename, processor_func, exchange_name in processors:
-            file_path = f"{output_path}/{filename}"
-            if os.path.exists(file_path):
-                try:
-                    logger.info(f"Processing {exchange_name} data...")
-                    token_df = processor_func(output_path)
-                    if not token_df.empty:
-                        copy_from_dataframe(token_df)
-                        total_records += len(token_df)
-                        logger.info(f"Processed {len(token_df)} records for {exchange_name}")
-                    else:
-                        logger.warning(f"No data found in {exchange_name} file")
-                except Exception as e:
-                    logger.error(f"Error processing {exchange_name}: {e}")
-            else:
-                logger.warning(f"File not found: {filename}")
-
-        # Clean up temporary files
-        delete_kotak_temp_data(output_path)
-
-        logger.info(f"Master contract download completed. Total records: {total_records}")
-
-        if total_records > 0:
-            return socketio.emit(
-                "master_contract_download",
-                {
-                    "status": "success",
-                    "message": f"Successfully Downloaded {total_records} records",
-                },
-            )
-        else:
-            raise Exception("No records were processed successfully")
+        os.makedirs("tmp", exist_ok=True)
+        # Isolate downloads so leftover or concurrent CSV files cannot qualify.
+        with TemporaryDirectory(prefix="kotak-master-", dir="tmp") as output_path:
+            downloaded = {os.path.basename(p) for p in download_csv_kotak_data(output_path)}
+            missing = {name for name, _, _ in processors} - downloaded
+            if missing:
+                raise ValueError("Incomplete master download: " + ", ".join(sorted(missing)))
+            frames = []
+            for _, processor, exchange_name in processors:
+                frame = processor(output_path)
+                if frame.empty:
+                    raise ValueError(f"No records in {exchange_name} master")
+                frames.append(frame)
+            records = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["exchange", "token"]).to_dict(orient="records")
+            if not _current_nifty_options(records):
+                raise ValueError("Current NIFTY call/put contract metadata is missing")
+            # Parse and validate every segment before replacing any saved row.
+            # Exchange token numbers can collide across segments.
+            db_session.query(SymToken).delete(synchronize_session=False)
+            db_session.bulk_insert_mappings(SymToken, records)
+            db_session.commit()
+        total_records = len(records)
+        logger.info("Master contract download completed. Total records: %s", total_records)
+        try:
+            return socketio.emit("master_contract_download", {
+                "status": "success", "message": f"Successfully Downloaded {total_records} records"})
+        except Exception:
+            logger.warning("Contracts committed; master notification was unavailable")
+            return None
 
     except Exception as e:
-        logger.error(f"Master contract download failed: {str(e)}")
-        return socketio.emit("master_contract_download", {"status": "error", "message": str(e)})
+        db_session.rollback()
+        logger.error("Master contract download failed: %s", type(e).__name__)
+        try:
+            socketio.emit("master_contract_download", {"status": "error", "message": "Master refresh failed; existing contracts retained"})
+        except Exception:
+            pass
+        # The shared completion wrapper must record an error, never success.
+        raise RuntimeError("Master refresh failed; existing contracts retained") from e
+    finally:
+        db_session.remove()
 
 
 def search_symbols(symbol, exchange):

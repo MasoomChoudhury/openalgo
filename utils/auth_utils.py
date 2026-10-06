@@ -364,6 +364,10 @@ def prepare_broker_contracts(broker):
     """Load valid cached contracts or refresh stale contracts without token renewal."""
     init_broker_status(broker)
     should_download, reason = should_download_master_contract(broker)
+    if broker == "kotak" and not should_download:
+        from broker.kotak.database.master_contract_db import current_nifty_options_ready
+        if not current_nifty_options_ready():
+            should_download, reason = True, "Current NIFTY option contracts are missing from the cached master"
     logger.info("Master contract readiness check for %s: %s", broker, reason)
     target = async_master_contract_download if should_download else load_existing_master_contract
     Thread(target=target, args=(broker,), daemon=True).start()

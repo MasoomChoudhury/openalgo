@@ -39,7 +39,8 @@ def source_identity():
     root = Path(__file__).resolve().parents[1]
     files = ("services/kotak_automation.py", "blueprints/kotak_automation.py",
              "broker/kotak/api/auth_api.py", "utils/auth_utils.py", "blueprints/brlogin.py",
-             "database/auth_db.py", "utils/session.py", "utils/config.py", "utils/env_check.py", "app.py")
+             "database/auth_db.py", "utils/session.py", "utils/config.py", "utils/env_check.py", "app.py",
+             "broker/kotak/database/master_contract_db.py")
     return {"contract_version": 1, "automation_source_digest": hashlib.sha256(
         b"".join(name.encode() + (root / name).read_bytes() for name in files)).hexdigest()}
 
@@ -173,6 +174,7 @@ def status(config):
     from utils.auth_utils import should_download_master_contract
     from utils.session import get_trading_session_date, has_login_this_trading_session
     from database.settings_db import get_analyze_mode
+    from broker.kotak.database.master_contract_db import current_nifty_options_ready
     username = config["KOTAK_AUTOLOGIN_USERNAME"]
     token = get_auth_token_fresh(username)
     authentication = probe_token(token)
@@ -180,6 +182,7 @@ def status(config):
         authentication = "expired"
     contract = get_status("kotak")
     download, _ = should_download_master_contract("kotak")
+    nifty_ready = current_nifty_options_ready()
     with database().connect() as conn:
         rows = conn.execute(select(operations).where(operations.c.username == username,
             operations.c.day == get_trading_session_date()).order_by(operations.c.updated.desc()).limit(10)).mappings().all()
@@ -193,8 +196,8 @@ def status(config):
         output.append(dict(latest) | {"details": json.loads(latest["details"]),
             "events": [dict(event) | {"details": json.loads(event["details"])} for event in events]})
     return {**source_identity(), "authentication": authentication, "mode": "analyze" if get_analyze_mode() else "live",
-        "contracts_ready": bool(contract.get("is_ready") and not download),
-        "contracts_status": contract.get("status", "unknown"), "operations": output}
+        "contracts_ready": bool(contract.get("is_ready") and not download and nifty_ready),
+        "contracts_status": contract.get("status", "unknown") if nifty_ready else "missing_current_nifty_options", "operations": output}
 
 
 def finish(operation, state, attempts, reason):
