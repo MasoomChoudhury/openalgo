@@ -941,9 +941,19 @@ class OrderManager:
                     400,
                 )
 
-            # Update order status
-            order.order_status = "cancelled"
-            order.update_timestamp = datetime.now(pytz.timezone("Asia/Kolkata"))
+            # Compete with execution on persisted state, not a stale ORM row.
+            # A fill winner must not be overwritten or have its margin released
+            # by a cancellation that read the order before the fill committed.
+            cancelled = SandboxOrders.query.filter(
+                SandboxOrders.orderid == orderid,
+                SandboxOrders.user_id == self.user_id,
+                SandboxOrders.order_status.in_(["open", "trigger pending"]),
+                SandboxOrders.filled_quantity == 0,
+            ).update({"order_status": "cancelled", "update_timestamp": datetime.now(pytz.timezone("Asia/Kolkata"))}, synchronize_session=False)
+            if not cancelled:
+                db_session.rollback()
+                return False, {"status": "error", "message": "Order changed before cancellation", "mode": "analyze"}, 409
+            db_session.refresh(order)
 
             # Release blocked margin using the exact amount that was blocked
             if (

@@ -369,6 +369,8 @@ class ExecutionEngine:
         Determines if order should be executed based on price type
         """
         try:
+            if order.order_status not in ("open", "trigger pending"):
+                return
             # Check if this order already has a trade (prevent duplicates)
             # This can happen with MARKET orders that are executed immediately on placement
             # but the order status hasn't been updated to 'complete' yet due to race condition
@@ -432,14 +434,14 @@ class ExecutionEngine:
             # the full open-order price-type logic below, which assumes an
             # order that is already live in the regular book.
             if order.order_status == "trigger pending":
-                self._process_trigger_pending_order(order, ltp)
+                self._process_trigger_pending_order(order, ltp, quote)
                 return
 
             # Determine if order should be executed based on price type
             should_execute = False
             execution_price = None
 
-            if order.price_type == "MARKET":
+            if order.price_type in ("MARKET", "SL-M"):
                 # Market orders execute immediately at bid/ask (more realistic)
                 # BUY: Execute at ask price (pay seller's asking price)
                 # SELL: Execute at bid price (receive buyer's bid price)
@@ -463,26 +465,12 @@ class ExecutionEngine:
                     execution_price = order.price  # Fill at limit price
 
             elif order.price_type == "SL":
-                # Stop Loss Limit order
-                # SL BUY: When LTP >= trigger price, order activates. Execute at LTP if LTP <= limit price
-                # SL SELL: When LTP <= trigger price, order activates. Execute at LTP if LTP >= limit price
-                if order.action == "BUY" and ltp >= order.trigger_price:
-                    if ltp <= order.price:
-                        should_execute = True
-                        execution_price = ltp  # Execute at current market price (LTP)
-                elif order.action == "SELL" and ltp <= order.trigger_price:
-                    if ltp >= order.price:
-                        should_execute = True
-                        execution_price = ltp  # Execute at current market price (LTP)
-
-            elif order.price_type == "SL-M":
-                # Stop Loss Market order
-                # BUY: Execute at market when LTP >= trigger price
-                # SELL: Execute at market when LTP <= trigger price
-                if order.action == "BUY" and ltp >= order.trigger_price:
+                # An open SL has already left the Stop-Loss book. Activation is
+                # durable: a rebound across the old trigger cannot disarm it.
+                if order.action == "BUY" and ltp <= order.price:
                     should_execute = True
                     execution_price = ltp
-                elif order.action == "SELL" and ltp <= order.trigger_price:
+                elif order.action == "SELL" and ltp >= order.price:
                     should_execute = True
                     execution_price = ltp
 
@@ -493,7 +481,7 @@ class ExecutionEngine:
         except Exception as e:
             logger.exception(f"Error processing order {order.orderid}: {e}")
 
-    def _process_trigger_pending_order(self, order, ltp):
+    def _process_trigger_pending_order(self, order, ltp, quote=None):
         """
         Check an SL/SL-M order resting in "trigger pending" against the
         current LTP and release it from the Stop-Loss book once triggered.
@@ -508,9 +496,8 @@ class ExecutionEngine:
         observable middle state). Otherwise it transitions to "open" - now
         resting live in the regular order book, unfilled - and the unmodified
         SL branch in _process_order picks it up on subsequent ticks exactly
-        like any other open SL order (re-checking the trigger condition there
-        is safe: once crossed, BUY prices staying at/above trigger, or SELL
-        prices staying at/below it, keep satisfying the same comparison).
+        like an ordinary active limit order. The trigger must never be checked
+        again after release, including after restart or a price modification.
         """
         try:
             trigger_met = False
@@ -522,36 +509,22 @@ class ExecutionEngine:
             if not trigger_met:
                 return  # Still resting in the Stop-Loss book, nothing to do
 
-            if order.price_type == "SL-M":
-                logger.info(
-                    f"SL-M order {order.orderid} triggered at LTP {ltp} "
-                    f"(trigger={order.trigger_price}) - executing at market"
-                )
-                self._execute_order(order, ltp)
+            # Conditional transition prevents a stale tick from resurrecting
+            # an order cancelled or completed by another evaluator.
+            changed = SandboxOrders.query.filter_by(
+                orderid=order.orderid, order_status="trigger pending"
+            ).update({"order_status": "open", "update_timestamp": datetime.now(pytz.timezone("Asia/Kolkata"))}, synchronize_session=False)
+            if not changed:
+                db_session.rollback()
                 return
-
-            # SL: triggered - check whether the limit price is also
-            # satisfiable right now, same tick.
-            limit_met = (order.action == "BUY" and ltp <= order.price) or (
-                order.action == "SELL" and ltp >= order.price
-            )
-            if limit_met:
-                logger.info(
-                    f"SL order {order.orderid} triggered and limit satisfied at LTP {ltp} "
-                    f"(trigger={order.trigger_price}, limit={order.price}) - executing"
-                )
-                self._execute_order(order, ltp)
-                return
-
-            logger.info(
-                f"SL order {order.orderid} triggered at LTP {ltp} "
-                f"(trigger={order.trigger_price}) but limit {order.price} not yet "
-                f"satisfiable - now resting open in the regular book"
-            )
-            order.order_status = "open"
-            order.update_timestamp = datetime.now(pytz.timezone("Asia/Kolkata"))
             db_session.commit()
+            db_session.refresh(order)
+            logger.info(
+                f"{order.price_type} order {order.orderid} activated at LTP {ltp} "
+                f"(trigger={order.trigger_price}, limit={order.price})"
+            )
             self._publish_order_update_event(order, order_status="open")
+            self._process_order(order, quote or {"ltp": ltp})
 
         except Exception as e:
             logger.exception(f"Error processing trigger-pending order {order.orderid}: {e}")
@@ -561,6 +534,18 @@ class ExecutionEngine:
         Execute an order - create trade, update positions, release/adjust margin
         """
         try:
+            # Claim the fill in the same transaction as its trade row. Both
+            # evaluators, and cancellation, compete on the persisted state.
+            claimed = SandboxOrders.query.filter(
+                SandboxOrders.orderid == order.orderid,
+                SandboxOrders.order_status.in_(["open", "trigger pending"]),
+                SandboxOrders.filled_quantity == 0,
+            ).update({"order_status": "complete", "average_price": execution_price,
+                      "filled_quantity": order.quantity, "pending_quantity": 0,
+                      "update_timestamp": datetime.now(pytz.timezone("Asia/Kolkata"))}, synchronize_session=False)
+            if not claimed:
+                db_session.rollback()
+                return
             logger.info(
                 f"Executing order {order.orderid}: {order.symbol} {order.action} {order.quantity} @ {execution_price}"
             )
