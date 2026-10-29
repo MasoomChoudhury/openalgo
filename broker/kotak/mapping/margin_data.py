@@ -63,72 +63,49 @@ def transform_margin_position(position):
         return None
 
 
+def _amount(value):
+    import math
+    if isinstance(value, bool) or value is None:
+        raise ValueError("Missing or invalid margin amount")
+    amount = float(value)
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError("Margin amount must be finite and nonnegative")
+    return amount
+
+
 def parse_margin_response(response_data):
-    """
-    Parse Kotak margin response to OpenAlgo standard format.
-
-    Args:
-        response_data: Raw response from Kotak API
-
-    Returns:
-        Standardized margin response
-    """
+    """Preserve API, amount and RMS distinctions; missing is never zero."""
+    if (not isinstance(response_data, dict) or response_data.get("stat") != "Ok"
+            or response_data.get("stCode") != 200):
+        return {"status": "error", "message": "Kotak margin API did not succeed"}
     try:
-        if not response_data or not isinstance(response_data, dict):
-            return {"status": "error", "message": "Invalid response from broker"}
-
-        # Check if the response status is Ok
-        if response_data.get("stat") != "Ok":
-            error_message = response_data.get("errMsg", "Failed to calculate margin")
-            return {"status": "error", "message": error_message}
-
-        # Extract margin data
-        # Kotak returns: avlMrgn, reqdMrgn, ordMrgn, mrgnUsd, rmsVldtd, etc.
-        total_margin_required = float(response_data.get("reqdMrgn", 0))
-
-        # Return standardized format matching OpenAlgo API specification
-        return {
-            "status": "success",
-            "data": {
-                "total_margin_required": total_margin_required,
-                "span_margin": 0,  # Kotak doesn't provide separate span margin
-                "exposure_margin": 0,  # Kotak doesn't provide separate exposure margin
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Error parsing margin response: {e}")
-        return {"status": "error", "message": f"Failed to parse margin response: {str(e)}"}
+        required = _amount(response_data.get("reqdMrgn"))
+        insufficient = _amount(response_data.get("insufFund"))
+        rms = response_data.get("rmsVldtd")
+        if rms not in {"OK", "NOT_OK"}:
+            raise ValueError("RMS validation is unavailable")
+        return {"status": "success", "data": {
+            "total_margin_required": required,
+            "rms_approved": rms == "OK" and insufficient == 0,
+            "rms_validation": rms, "insufficient_funds": insufficient,
+            "amount_semantics": "net_order_requirement",
+        }}
+    except (ValueError, TypeError, OverflowError):
+        return {"status": "error", "message": "Kotak margin fields are missing or invalid"}
 
 
 def parse_batch_margin_response(responses):
-    """
-    Parse multiple Kotak margin responses and aggregate them.
-
-    Args:
-        responses: List of individual margin responses
-
-    Returns:
-        Aggregated margin response
-    """
+    """A complete standalone estimate; never asserts joint-basket verification."""
+    if not responses or any(not isinstance(r, dict) or r.get("status") != "success" for r in responses):
+        return {"status": "error", "message": "Incomplete margin calculation"}
     try:
-        total_required_margin = 0
-
-        for response in responses:
-            if response.get("status") == "success":
-                data = response.get("data", {})
-                total_required_margin += data.get("total_margin_required", 0)
-
-        # Return standardized format matching OpenAlgo API specification
-        return {
-            "status": "success",
-            "data": {
-                "total_margin_required": total_required_margin,
-                "span_margin": 0,  # Kotak doesn't provide separate span margin
-                "exposure_margin": 0,  # Kotak doesn't provide separate exposure margin
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Error parsing batch margin response: {e}")
-        return {"status": "error", "message": f"Failed to parse batch margin response: {str(e)}"}
+        amounts = [_amount(r.get("data", {}).get("total_margin_required")) for r in responses]
+        insufficient = [_amount(r.get("data", {}).get("insufficient_funds")) for r in responses]
+        total = _amount(sum(amounts))
+        return {"status": "success", "data": {
+            "total_margin_required": total,
+            "rms_approved": all(r["data"].get("rms_approved") is True for r in responses),
+            "insufficient_funds": sum(insufficient),
+        }}
+    except (ValueError, TypeError, OverflowError, AttributeError):
+        return {"status": "error", "message": "Invalid margin aggregate"}

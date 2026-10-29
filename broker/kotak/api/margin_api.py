@@ -27,7 +27,7 @@ def calculate_single_margin(position_data, auth_token):
     session_token, session_sid, base_url, access_token = auth_token.split(":::")[:4]
 
     # Debug logging for baseUrl
-    logger.debug(f"MARGIN API - Using baseUrl: {base_url}")
+    logger.debug("Kotak single-order margin request")
 
     # Get the shared httpx client with connection pooling
     client = get_httpx_client()
@@ -45,7 +45,7 @@ def calculate_single_margin(position_data, auth_token):
     json_string = json.dumps(position_data)
     payload = f"jData={urllib.parse.quote(json_string)}"
 
-    logger.debug(f"Kotak margin calculation payload: {payload}")
+
 
     # Construct full URL
     url = f"{base_url}/quick/user/check-margin"
@@ -61,20 +61,20 @@ def calculate_single_margin(position_data, auth_token):
         try:
             response_data = response.json()
         except json.JSONDecodeError:
-            logger.error(f"Failed to parse JSON response: {response.text}")
+            logger.error("Invalid Kotak margin JSON")
             error_response = {"status": "error", "message": "Invalid response from broker API"}
             return response, error_response
 
-        logger.debug(f"Kotak margin response: {response_data}")
+
 
         # Parse and standardize the response
-        standardized_response = parse_margin_response(response_data)
+        standardized_response = parse_margin_response(response_data) if response.status_code == 200 else {"status":"error","message":"Kotak margin HTTP failure"}
 
         return response, standardized_response
 
     except Exception as e:
-        logger.error(f"Error calling Kotak margin API: {e}")
-        error_response = {"status": "error", "message": f"Failed to calculate margin: {str(e)}"}
+        logger.error("Kotak margin transport failed: %s", type(e).__name__)
+        error_response = {"status": "error", "message": "Kotak margin transport failed"}
 
         # Create a mock response object
         class MockResponse:
@@ -85,61 +85,48 @@ def calculate_single_margin(position_data, auth_token):
 
 
 def calculate_margin_api(positions, auth):
-    """
-    Calculate margin requirement for a basket of positions using Kotak API.
+    """All-leg integrity with explicit standalone-only calculation provenance."""
+    import hashlib
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
 
-    Note: Kotak's margin API accepts only one order at a time,
-    so we make multiple API calls and aggregate the results.
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
-    Args:
-        positions: List of positions in OpenAlgo format
-        auth: Authentication token for Kotak
+    def fail(message, status=502, records=None):
+        return SimpleNamespace(status_code=status, status=status), {
+            "status":"error", "message":message,
+            "calculation":{"version":1,"complete":False,"legs":records or []}}
 
-    Returns:
-        Tuple of (response, response_data)
-    """
-    # Transform all positions
-    transformed_positions = []
-    for position in positions:
-        transformed = transform_margin_position(position)
-        if transformed:
-            transformed_positions.append(transformed)
-
-    if not transformed_positions:
-        error_response = {
-            "status": "error",
-            "message": "No valid positions to calculate margin. Check if symbols are valid.",
-        }
-
-        class MockResponse:
-            status_code = 400
-            status = 400
-
-        return MockResponse(), error_response
-
-    # Calculate margin for each position
-    margin_responses = []
-    last_response = None
-
-    for position_data in transformed_positions:
-        response, parsed_response = calculate_single_margin(position_data, auth)
-        last_response = response
-        margin_responses.append(parsed_response)
-
-        # If any single margin calculation fails, we might want to continue
-        # but log the error
-        if parsed_response.get("status") == "error":
-            logger.warning(
-                f"Margin calculation failed for position: {position_data}, Error: {parsed_response.get('message')}"
-            )
-
-    # Aggregate the responses
-    if len(margin_responses) == 1:
-        # Single position - return as-is
-        final_response = margin_responses[0]
-    else:
-        # Multiple positions - aggregate
-        final_response = parse_batch_margin_response(margin_responses)
-
-    # Return the last HTTP response object and the aggregated data
-    return last_response, final_response
+    if not isinstance(positions, list) or not positions or any(not isinstance(p, dict) for p in positions):
+        return fail("Invalid margin positions",400)
+    try:
+        request_hash=digest(positions)
+        transformed=[transform_margin_position(p) for p in positions]
+    except (ValueError, TypeError, KeyError):
+        return fail("Invalid margin positions",400)
+    if any(not p for p in transformed):
+        return fail("At least one margin leg could not be resolved",400)
+    results=[]; records=[]
+    for index, (original, position) in enumerate(zip(positions,transformed)):
+        response, parsed=calculate_single_margin(position,auth)
+        status=getattr(response,"status_code",None)
+        valid=status==200 and isinstance(parsed,dict) and parsed.get("status")=="success"
+        record={"index":index,"request_sha256":digest(original),"http_status":status,
+                "status":"success" if valid else "error","observed_at":datetime.now(timezone.utc).isoformat()}
+        if valid:
+            data=parsed.get("data",{})
+            record.update({k:data.get(k) for k in ("total_margin_required","rms_validation","rms_approved","insufficient_funds")})
+        records.append(record)
+        if not valid:
+            return fail("Margin provider failed for leg " + str(index),status if isinstance(status,int) and status>=400 else 502,records)
+        results.append(parsed)
+    aggregate=parse_batch_margin_response(results)
+    if aggregate.get("status")!="success":return fail("Invalid margin aggregate",502,records)
+    aggregate["data"]["calculation"]={
+        "version":1,"method":"standalone_order_sum","scope":"independent_orders",
+        "amount_semantics":"sum_of_net_order_requirements","complete":True,
+        "verification_supported":False,"requested_count":len(positions),"result_count":len(results),
+        "request_sha256":request_hash,"measured_at":datetime.now(timezone.utc).isoformat(),"legs":records,
+    }
+    return SimpleNamespace(status_code=200,status=200),aggregate

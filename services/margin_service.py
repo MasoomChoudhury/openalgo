@@ -213,7 +213,7 @@ def calculate_margin_with_auth(
     else:
         status_code = 500
 
-    if status_code == 200:
+    if status_code == 200 and isinstance(response_data, dict) and response_data.get("status") == "success":
         # Log successful margin calculation
         executor.submit(async_log_order, "margin", original_data, response_data)
         return True, response_data, 200
